@@ -3,7 +3,7 @@ name=CartoDXF
 qgisMinimumVersion=3.16
 qgisMaximumVersion=4.99
 description=Export QGIS vector layers to a professional DXF, one DXF layer per category, with real colors, line widths and line types. / Exporta capas vectoriales de QGIS a un DXF profesional, una capa DXF por categoría, con colores, grosores y tipos de línea reales.
-version=1.1.1
+version=1.2.0
 author=Kiko Molina
 email=kmlidar@outlook.com
 about=QGIS plugin to export loaded vector layers (points, lines, polygons) to a single
@@ -32,7 +32,17 @@ about=QGIS plugin to export loaded vector layers (points, lines, polygons) to a 
 
 tracker=https://github.com/kmlidar/CartoDXF/issues
 repository=https://github.com/kmlidar/CartoDXF
-changelog=1.1.1
+changelog=
+    1.2.0
+    - Fixed: the automatic ezdxf installer could report success and still leave
+      the plugin unable to import it (ModuleNotFoundError right after
+      installing). This happened because it installed into the user's
+      "--user" site-packages folder, which QGIS's bundled Python often does
+      not search. It now installs into a private folder inside the plugin
+      itself and adds it directly to the Python path, so it no longer
+      depends on that setting.
+
+    1.1.1
     - Fixed: on Linux, automatic installation of the ezdxf library could fail
       with no clear explanation, due to the "externally-managed-environment"
       protection present in recent Ubuntu/Debian Python installations. The

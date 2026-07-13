@@ -10,25 +10,69 @@ _ezdxf = None
 _TEA = None
 
 
+def _vendor_dir():
+    """Carpeta propia del plugin donde se instala ezdxf si no está ya
+    disponible en el Python de QGIS. Al estar siempre dentro de la carpeta
+    del plugin (en AppData/Roaming, o el equivalente en Linux/Mac), nunca
+    hay problemas de permisos de escritura, y al añadirla nosotros mismos a
+    sys.path no depende de que el "user site-packages" de Python esté
+    habilitado (site.ENABLE_USER_SITE), que en el intérprete embebido de
+    QGIS suele venir desactivado — esta es la causa real de que antes la
+    instalación con --user "funcionara" (pip devolvía código 0) pero el
+    siguiente import ezdxf siguiera fallando.
+    """
+    import os
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), '_vendor')
+
+
 def _ensure_ezdxf():
     global _ezdxf, _TEA
     if _ezdxf is not None:
         return
+
+    import sys
+    import os
+    import importlib
+
+    vendor = _vendor_dir()
+    if os.path.isdir(vendor) and vendor not in sys.path:
+        sys.path.insert(0, vendor)
+
     try:
         import ezdxf
         from ezdxf.enums import TextEntityAlignment as TEA
         _ezdxf = ezdxf
         _TEA = TEA
+        return
     except ImportError:
-        _install_ezdxf()
+        pass
+
+    _install_ezdxf(vendor)
+
+    # Tras instalar, hay que asegurarse de que Python reconoce la carpeta
+    # como recién poblada (invalidar cachés de import) y que sigue en
+    # sys.path antes de reintentar.
+    importlib.invalidate_caches()
+    if vendor not in sys.path:
+        sys.path.insert(0, vendor)
+
+    try:
         import ezdxf
         from ezdxf.enums import TextEntityAlignment as TEA
         _ezdxf = ezdxf
         _TEA = TEA
+    except ImportError as e:
+        raise RuntimeError(
+            "ezdxf se ha instalado pero QGIS todavía no lo encuentra.\n\n"
+            "Cierra QGIS por completo y vuelve a abrirlo; si el problema "
+            "persiste, instálalo manualmente desde la consola OSGeo4W:\n"
+            "  python -m pip install ezdxf\n\n"
+            f"Detalle: {e}"
+        ) from e
 
 
-def _install_ezdxf():
-    import subprocess
+def _install_ezdxf(vendor_dir):
+    import subprocess  # nosec B404 - used with shell=False and a fixed argument list only
     import sys
     import os
     import glob
@@ -44,30 +88,41 @@ def _install_ezdxf():
                 exe = candidate
                 break
 
-    # Distintas combinaciones de flags a probar en orden. En Linux (Ubuntu/Debian
-    # 23.04+, y por tanto muchas instalaciones de QGIS en Linux) pip rechaza
-    # instalar en el Python del sistema salvo que se indique --break-system-packages
-    # o --user, así que probamos varias estrategias antes de rendirnos.
+    os.makedirs(vendor_dir, exist_ok=True)
+
+    # Se instala con --target en una carpeta propia del plugin en vez de
+    # con --user: así no hace falta ser administrador (la carpeta del
+    # plugin siempre es escribible) y no depende de que el "user site" de
+    # Python esté habilitado en el intérprete embebido de QGIS. En Linux,
+    # algunas distribuciones (Ubuntu/Debian 23.04+) rechazan igualmente la
+    # instalación salvo que se indique --break-system-packages, así que se
+    # prueba primero sin la bandera y, si falla, con ella.
     attempts = [
-        ['--quiet'],
-        ['--quiet', '--user'],
-        ['--quiet', '--break-system-packages'],
-        ['--quiet', '--user', '--break-system-packages'],
+        [],
+        ['--break-system-packages'],
     ]
 
     last_output = ""
     for flags in attempts:
-        cmd = [exe, '-m', 'pip', 'install', 'ezdxf'] + flags
+        cmd = ([exe, '-m', 'pip', 'install', '--quiet', '--upgrade',
+                '--target', vendor_dir, 'ezdxf'] + flags)
         try:
-            result = subprocess.run(
+            # "exe" is resolved above from sys.executable / a local QGIS
+            # Python installation path, not from any external or
+            # user-supplied input; the rest of the command is a fixed list
+            # of literals, and shell=False (the default) is used, so there
+            # is no shell-injection surface here.
+            result = subprocess.run(  # nosec B603 B607
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                shell=False,
             )
             if result.returncode == 0:
                 return
             last_output = result.stdout or ""
+
         except Exception as e:
             last_output = str(e)
 
@@ -79,7 +134,7 @@ def _install_ezdxf():
         "  - Linux:\n"
         "      python3 -m pip install ezdxf --break-system-packages\n"
         "    (o crea un entorno virtual e indícaselo a QGIS)\n\n"
-        f"Comando probado: {exe} -m pip install ezdxf\n"
+        f"Comando probado: {exe} -m pip install --target {vendor_dir} ezdxf\n"
         f"Detalle del último intento:\n{last_output.strip()[-800:]}"
     )
 
@@ -346,7 +401,10 @@ class DXFExporter:
         for lt in ('DASHED', 'DOTTED', 'DASHDOT', 'DIVIDE'):
             try:
                 self.doc.linetypes.add(lt, pattern=[0.5, -0.25])
-            except Exception:
+            except _ezdxf.DXFTableEntryError:
+                # El tipo de línea ya existe en la plantilla base de ezdxf
+                # (algunos vienen predefinidos según la versión); no es un
+                # error real, simplemente no hace falta volver a crearlo.
                 pass
 
     # ── Capa DXF ──────────────────────────────────────────────────────────────
@@ -384,7 +442,9 @@ class DXFExporter:
                 try:
                     # color exacto de verdad: propiedad .rgb (gestiona el true_color)
                     lyr.rgb = (qcolor.red(), qcolor.green(), qcolor.blue())
-                except Exception:
+                except (TypeError, ValueError, AttributeError):
+                    # QColor con canales inválidos o no inicializados: nos
+                    # quedamos con el color ACI de respaldo ya asignado arriba.
                     pass
 
             lyr.dxf.lineweight = lw_dxf
