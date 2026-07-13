@@ -38,8 +38,6 @@ changelog=
       unscoped enum syntax (e.g. QgsWkbTypes.Point), which is invalid in the
       newer, strictly-scoped PyQt6/PyQGIS API. Changed to the scoped form
       (QgsWkbTypes.Type.Point) throughout the export code.
-
-    1.2.0
     - Fixed: the automatic ezdxf installer could report success and still leave
       the plugin unable to import it (ModuleNotFoundError right after
       installing). This happened because it installed into the user's
