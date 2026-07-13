@@ -561,14 +561,14 @@ class DXFExporter:
         wkb_type = QgsWkbTypes.flatType(geom.wkbType())
 
         # Puntos
-        if wkb_type == QgsWkbTypes.Point:
+        if wkb_type == QgsWkbTypes.Type.Point:
             pt = geom.asPoint()
             tp = self._pt(pt, transform)
             self._add_point(tp, layer_name, props)
             if export_symbol_block:
                 self._add_symbol_block(tp, layer_name, props, symbol_size)
 
-        elif wkb_type == QgsWkbTypes.MultiPoint:
+        elif wkb_type == QgsWkbTypes.Type.MultiPoint:
             for pt in geom.asMultiPoint():
                 tp = self._pt(pt, transform)
                 self._add_point(tp, layer_name, props)
@@ -576,17 +576,17 @@ class DXFExporter:
                     self._add_symbol_block(tp, layer_name, props, symbol_size)
 
         # Líneas
-        elif wkb_type == QgsWkbTypes.LineString:
+        elif wkb_type == QgsWkbTypes.Type.LineString:
             pts = [self._pt(p, transform) for p in geom.asPolyline()]
             self._add_polyline(pts, layer_name, props)
 
-        elif wkb_type == QgsWkbTypes.MultiLineString:
+        elif wkb_type == QgsWkbTypes.Type.MultiLineString:
             for line in geom.asMultiPolyline():
                 pts = [self._pt(p, transform) for p in line]
                 self._add_polyline(pts, layer_name, props)
 
         # Polígonos
-        elif wkb_type == QgsWkbTypes.Polygon:
+        elif wkb_type == QgsWkbTypes.Type.Polygon:
             poly = geom.asPolygon()
             if not poly:
                 return
@@ -607,7 +607,7 @@ class DXFExporter:
             for hole in holes:
                 self._add_polyline(hole, layer_name, outline_props, closed=True)
 
-        elif wkb_type == QgsWkbTypes.MultiPolygon:
+        elif wkb_type == QgsWkbTypes.Type.MultiPolygon:
             for poly in geom.asMultiPolygon():
                 if not poly:
                     continue

@@ -3,7 +3,7 @@ name=CartoDXF
 qgisMinimumVersion=3.16
 qgisMaximumVersion=4.99
 description=Export QGIS vector layers to a professional DXF, one DXF layer per category, with real colors, line widths and line types. / Exporta capas vectoriales de QGIS a un DXF profesional, una capa DXF por categoría, con colores, grosores y tipos de línea reales.
-version=1.2.0
+version=1.2.1
 author=Kiko Molina
 email=kmlidar@outlook.com
 about=QGIS plugin to export loaded vector layers (points, lines, polygons) to a single
@@ -33,6 +33,12 @@ about=QGIS plugin to export loaded vector layers (points, lines, polygons) to a 
 tracker=https://github.com/kmlidar/CartoDXF/issues
 repository=https://github.com/kmlidar/CartoDXF
 changelog=
+    1.2.1
+    - Fixed: Qt6 compatibility issue. Geometry type comparisons used the old
+      unscoped enum syntax (e.g. QgsWkbTypes.Point), which is invalid in the
+      newer, strictly-scoped PyQt6/PyQGIS API. Changed to the scoped form
+      (QgsWkbTypes.Type.Point) throughout the export code.
+
     1.2.0
     - Fixed: the automatic ezdxf installer could report success and still leave
       the plugin unable to import it (ModuleNotFoundError right after
