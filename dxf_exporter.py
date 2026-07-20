@@ -4,10 +4,24 @@ dxf_exporter.py  —  Motor de exportación QGIS → DXF
 Una capa DXF por cada valor único del campo de categoría.
 """
 import math
+import logging
 
 # ezdxf se importa de forma diferida para no bloquear el arranque del plugin
 _ezdxf = None
 _TEA = None
+
+# Logger dedicado del plugin. Se usa en los puntos donde una excepción de la
+# API de QGIS/Qt se ignora deliberadamente (símbolo, expresión o geometría
+# puntual que falla para UNA sola entidad/capa): en vez de silenciarla del
+# todo (except/pass), queda registrada aquí para poder diagnosticarla desde
+# el panel de registro de QGIS (Ver → Paneles → Registro), sin que una
+# entidad problemática interrumpa el resto de la exportación.
+_logger = logging.getLogger('CartoDXF')
+
+
+def _log_ignored(context, exc):
+    """Registra (nivel DEBUG) una excepción que se ignora a propósito."""
+    _logger.debug('%s: %s: %s', context, type(exc).__name__, exc)
 
 
 def _vendor_dir():
@@ -279,11 +293,12 @@ def _get_label_settings(qgis_layer):
                     s = child.settings()
                     if s is not None:
                         return s
-                except Exception:
+                except Exception as e:
+                    _log_ignored('_get_label_settings: child.settings()', e)
                     continue
             return None
-    except Exception:
-        pass
+    except Exception as e:
+        _log_ignored('_get_label_settings: rule based labeling', e)
 
     try:
         return labeling.settings()
@@ -323,8 +338,8 @@ def _label_rotation_for_feature(label_settings, feat, ctx, geom):
                     # QGIS mide la rotación en sentido horario; DXF en
                     # antihorario (igual que con los símbolos de punto).
                     return -float(val)
-        except Exception:
-            pass
+        except Exception as e:
+            _log_ignored('_label_rotation_for_feature: rotation dataDefined', e)
 
     try:
         from qgis.core import QgsWkbTypes
@@ -389,16 +404,16 @@ def _rule_based_symbol_for_feature(renderer, feat, ctx):
 
     try:
         ctx.expressionContext().setFeature(feat)
-    except Exception:
-        pass
+    except Exception as e:
+        _log_ignored('_rule_based_symbol_for_feature: setFeature', e)
 
     def _walk(rule):
         for child in rule.children():
             try:
                 if not child.active():
                     continue
-            except Exception:
-                pass
+            except Exception as e:
+                _log_ignored('_rule_based_symbol_for_feature: child.active()', e)
 
             matched = True
             filt = child.filterExpression()
@@ -486,8 +501,8 @@ def _symbol_props(qgis_symbol):
                         if c is not None and c.isValid() and c.alpha() > 0:
                             fc = c
                             break
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        _log_ignored(f'_symbol_props: {getter}()', e)
             if fc is None:
                 sub = getattr(sl, 'subSymbol', None)
                 if callable(sub):
@@ -497,8 +512,8 @@ def _symbol_props(qgis_symbol):
                             c = sub_symbol.color()
                             if c is not None and c.isValid() and c.alpha() > 0:
                                 fc = c
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        _log_ignored('_symbol_props: subSymbol().color()', e)
             if fc is not None:
                 props['fill_color'] = fc
                 if props['color'] is None:
@@ -513,8 +528,8 @@ def _symbol_props(qgis_symbol):
                         if c is not None and c.isValid() and c.alpha() > 0:
                             sc = c
                             break
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        _log_ignored(f'_symbol_props: {getter}()', e)
             if sc is not None:
                 props['color'] = sc
 
@@ -914,8 +929,8 @@ class DXFExporter:
                     self.extent_crs, qgis_layer.crs(), QgsProject.instance())
                 try:
                     ext = ext_transform.transformBoundingBox(ext)
-                except Exception:
-                    pass
+                except Exception as e:
+                    _log_ignored('export_layer: transformBoundingBox', e)
             request.setFilterRect(ext)
             from qgis.core import QgsGeometry
             clip_geom = QgsGeometry.fromRect(ext)
@@ -934,8 +949,8 @@ class DXFExporter:
             ctx = QgsRenderContext()
             try:
                 ctx.setExtent(qgis_layer.extent())
-            except Exception:
-                pass
+            except Exception as e:
+                _log_ignored('export_layer: ctx.setExtent fallback', e)
         if renderer:
             renderer.startRender(ctx, qgis_layer.fields())
 
@@ -952,8 +967,8 @@ class DXFExporter:
                 if clip_geom is not None and geom is not None and not geom.isEmpty():
                     try:
                         geom = geom.intersection(clip_geom)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        _log_ignored('export_layer: geom.intersection(clip_geom)', e)
                     if geom is None or geom.isEmpty():
                         continue
 
