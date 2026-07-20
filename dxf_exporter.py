@@ -260,6 +260,174 @@ def _ltype_name(qt_pen_style):
 
 # ── Lectura de simbología QGIS ────────────────────────────────────────────────
 
+def _get_label_settings(qgis_layer):
+    """Devuelve el QgsPalLayerSettings activo de la capa (el de la primera
+    regla, si el etiquetado es "basado en reglas"), o None si la capa no
+    tiene etiquetado configurado."""
+    try:
+        labeling = qgis_layer.labeling()
+    except Exception:
+        return None
+    if labeling is None:
+        return None
+
+    try:
+        from qgis.core import QgsRuleBasedLabeling
+        if isinstance(labeling, QgsRuleBasedLabeling):
+            for child in labeling.rootRule().children():
+                try:
+                    s = child.settings()
+                    if s is not None:
+                        return s
+                except Exception:
+                    continue
+            return None
+    except Exception:
+        pass
+
+    try:
+        return labeling.settings()
+    except Exception:
+        return None
+
+
+def _label_rotation_for_feature(label_settings, feat, ctx, geom):
+    """Ángulo (grados, sentido antihorario, 0 = horizontal) con el que se
+    debe escribir el texto exportado a DXF para conservar, en la medida
+    de lo posible, la orientación que tiene en QGIS:
+
+    1) Si el etiquetado tiene una rotación por datos (campo/expresión de
+       "Rotación"), se usa ese valor tal cual.
+    2) Si no, y la geometría es una línea (calles, viales...), se
+       aproxima con el ángulo del propio tramo en el punto donde se
+       coloca el texto — igual que la colocación "Paralela a la línea"
+       de QGIS —, ajustado para que el texto no quede boca abajo.
+    3) En cualquier otro caso, 0 (horizontal), como antes.
+
+    Nota: la colocación "Curva" de QGIS (texto siguiendo la curvatura de
+    la línea, letra a letra) no tiene equivalente en una entidad TEXT de
+    DXF; aquí se aproxima con un único ángulo recto, que es lo que
+    cualquier CAD puede representar.
+    """
+    import math
+
+    if label_settings is not None:
+        try:
+            from qgis.core import QgsPalLayerSettings
+            props = label_settings.dataDefinedProperties()
+            if props.isActive(QgsPalLayerSettings.Property.LabelRotation):
+                ctx.expressionContext().setFeature(feat)
+                val, ok = props.value(QgsPalLayerSettings.Property.LabelRotation,
+                                       ctx.expressionContext())
+                if ok and val is not None:
+                    # QGIS mide la rotación en sentido horario; DXF en
+                    # antihorario (igual que con los símbolos de punto).
+                    return -float(val)
+        except Exception:
+            pass
+
+    try:
+        from qgis.core import QgsWkbTypes
+        if geom is None or geom.isEmpty():
+            return 0.0
+        if QgsWkbTypes.geometryType(geom.wkbType()) != QgsWkbTypes.GeometryType.LineGeometry:
+            return 0.0
+
+        if geom.isMultipart():
+            parts = geom.asMultiPolyline()
+            pts = max(parts, key=len) if parts else None
+        else:
+            pts = geom.asPolyline()
+        if not pts or len(pts) < 2:
+            return 0.0
+
+        centroid = geom.centroid().asPoint()
+        best_d = None
+        best_ang = 0.0
+        for i in range(len(pts) - 1):
+            p1, p2 = pts[i], pts[i + 1]
+            mx, my = (p1.x() + p2.x()) / 2, (p1.y() + p2.y()) / 2
+            d = (mx - centroid.x()) ** 2 + (my - centroid.y()) ** 2
+            if best_d is None or d < best_d:
+                best_d = d
+                ang = math.degrees(math.atan2(p2.y() - p1.y(), p2.x() - p1.x()))
+                # Nunca boca abajo: se mantiene siempre legible de
+                # izquierda a derecha (entre -90° y 90°).
+                if ang > 90:
+                    ang -= 180
+                elif ang < -90:
+                    ang += 180
+                best_ang = ang
+        return best_ang
+    except Exception:
+        return 0.0
+
+
+def _rule_based_symbol_for_feature(renderer, feat, ctx):
+    """Empareja manualmente las reglas de un QgsRuleBasedRenderer con la
+    entidad, IGNORANDO el rango de escala de cada regla.
+
+    renderer.symbolForFeature() puede devolver None para renderers "Basado
+    en reglas" cuando se ejecuta fuera del pipeline normal de dibujado del
+    lienzo (como aquí, en un hilo de exportación): qué reglas están
+    "activas" depende de la escala que trae el contexto, y si ninguna
+    regla activa cubre esa escala concreta no se devuelve ningún símbolo
+    — incluso si hay una regla sin ninguna restricción de escala, como
+    suele ser la regla "base" de un estilo con sombra (p.ej. "Building"
+    sin límite de escala + "Shadow 1/2/3" limitadas a un rango estrecho
+    para simular la sombra solo al hacer zoom).
+
+    Un DXF no tiene "escala de visualización": es un dibujo a coordenadas
+    reales, así que aquí basta con comprobar el filtro (expresión) de cada
+    regla, exactamente igual que si se imprimiera/exportara a una escala
+    fija; se ignora a propósito el rango de escala.
+    """
+    from qgis.core import QgsRuleBasedRenderer, QgsExpression
+
+    if not isinstance(renderer, QgsRuleBasedRenderer):
+        return None
+
+    try:
+        ctx.expressionContext().setFeature(feat)
+    except Exception:
+        pass
+
+    def _walk(rule):
+        for child in rule.children():
+            try:
+                if not child.active():
+                    continue
+            except Exception:
+                pass
+
+            matched = True
+            filt = child.filterExpression()
+            if filt and filt.strip().upper() != 'ELSE':
+                try:
+                    expr = QgsExpression(filt)
+                    expr.prepare(ctx.expressionContext())
+                    matched = bool(expr.evaluate(ctx.expressionContext()))
+                except Exception:
+                    # Si la expresión no se puede evaluar aquí, no se
+                    # descarta la regla por eso: mejor un color aproximado
+                    # que ninguno.
+                    matched = True
+
+            if not matched:
+                continue
+
+            sym = child.symbol()
+            if sym is not None:
+                return sym
+            nested = _walk(child)
+            if nested is not None:
+                return nested
+
+        return None
+
+    return _walk(renderer.rootRule())
+
+
 def _symbol_props(qgis_symbol):
     """Extrae color, grosor y tipo de línea de un QgsSymbol."""
     from qgis.core import QgsSimpleLineSymbolLayer, QgsSimpleFillSymbolLayer, QgsSimpleMarkerSymbolLayer
@@ -276,8 +444,9 @@ def _symbol_props(qgis_symbol):
         return props
 
     color = qgis_symbol.color()
-    props['color'] = color
-    props['fill_color'] = color  # fallback: color principal también como relleno
+    if color is not None and color.isValid():
+        props['color'] = color
+        props['fill_color'] = color  # fallback: color principal también como relleno
 
     for i in range(qgis_symbol.symbolLayerCount()):
         sl = qgis_symbol.symbolLayer(i)
@@ -297,8 +466,60 @@ def _symbol_props(qgis_symbol):
                 props['marker_angle'] = sl.angle()
             except Exception:
                 props['marker_angle'] = 0.0
+        else:
+            # Tipos de relleno "avanzados" (degradado, shapeburst, textura,
+            # patrón de puntos/líneas, relleno de centroide con marcador...)
+            # no son instancias de QgsSimpleFillSymbolLayer, así que caían
+            # fuera de todos los "elif" anteriores y no aportaban ningún
+            # color propio: fill_color se quedaba con lo que hubiera puesto
+            # qgis_symbol.color() más arriba (a veces un color por defecto
+            # sin inicializar → negro). Casi todos estos tipos de capa sí
+            # exponen ALGÚN color reconocible a través de fillColor(),
+            # color() o subSymbol().color(); se prueba cada uno y se usa
+            # el primero que dé un color válido y no transparente.
+            fc = None
+            for getter in ('fillColor', 'color'):
+                fn = getattr(sl, getter, None)
+                if callable(fn):
+                    try:
+                        c = fn()
+                        if c is not None and c.isValid() and c.alpha() > 0:
+                            fc = c
+                            break
+                    except Exception:
+                        pass
+            if fc is None:
+                sub = getattr(sl, 'subSymbol', None)
+                if callable(sub):
+                    try:
+                        sub_symbol = sub()
+                        if sub_symbol is not None:
+                            c = sub_symbol.color()
+                            if c is not None and c.isValid() and c.alpha() > 0:
+                                fc = c
+                    except Exception:
+                        pass
+            if fc is not None:
+                props['fill_color'] = fc
+                if props['color'] is None:
+                    props['color'] = fc
+
+            sc = None
+            for getter in ('strokeColor', 'outlineColor', 'color'):
+                fn = getattr(sl, getter, None)
+                if callable(fn):
+                    try:
+                        c = fn()
+                        if c is not None and c.isValid() and c.alpha() > 0:
+                            sc = c
+                            break
+                    except Exception:
+                        pass
+            if sc is not None:
+                props['color'] = sc
 
     return props
+
 
 
 # ── Bloques de símbolo (marcador QGIS → bloque DXF) ───────────────────────────
@@ -386,11 +607,29 @@ class DXFExporter:
     Cada valor único del campo de categoría → una capa DXF.
     """
 
-    def __init__(self, output_path, target_crs=None, progress_cb=None):
+    def __init__(self, output_path, target_crs=None, progress_cb=None,
+                 map_settings=None, extent=None, extent_crs=None):
+        """
+        map_settings: QgsMapSettings del lienzo actual de QGIS (opcional).
+                        Si se indica, se usa para construir un
+                        QgsRenderContext real (con extensión y escala
+                        válidas), imprescindible para que renderers
+                        "Basado en reglas" con filtros de escala u
+                        expresiones resuelvan bien el símbolo. Sin esto,
+                        symbolForFeature() puede devolver None y el color
+                        cae al negro por defecto.
+        extent/extent_crs: si se indican, solo se exportan las entidades
+                        que intersecan esa extensión (p.ej. la vista
+                        actual del lienzo), independientemente de si la
+                        capa tiene o no un filtro (subset string) propio.
+        """
         _ensure_ezdxf()
         self.output_path = output_path
         self.target_crs = target_crs
         self.progress_cb = progress_cb or (lambda v, msg: None)
+        self.map_settings = map_settings
+        self.extent = extent
+        self.extent_crs = extent_crs
 
         self.doc = _ezdxf.new('R2010', setup=True)
         self.msp = self.doc.modelspace()
@@ -544,8 +783,10 @@ class DXFExporter:
             if h2d:
                 hatch.paths.add_polyline_path(h2d, is_closed=True, flags=1)
 
-    def _add_text(self, text, x, y, height, layer_name, qcolor):
+    def _add_text(self, text, x, y, height, layer_name, qcolor, rotation=0.0):
         attrs = {'layer': layer_name, 'height': height, 'insert': (x, y)}
+        if rotation:
+            attrs['rotation'] = rotation
         attrs.update(_color_attribs(qcolor))
         self.msp.add_text(str(text), dxfattribs=attrs)
 
@@ -646,28 +887,75 @@ class DXFExporter:
                         cuando se usa un renderer "Categorizado" con colores
                         aleatorios, ya que ahí solo el relleno varía.
         """
-        from qgis.core import QgsVectorLayer, QgsRenderContext
+        from qgis.core import QgsVectorLayer, QgsRenderContext, QgsFeatureRequest
 
         if not isinstance(qgis_layer, QgsVectorLayer):
             return
 
         renderer = qgis_layer.renderer()
         transform = self._get_transform(qgis_layer)
-        features = list(qgis_layer.getFeatures())
+
+        # ── Filtro y recorte por extensión (p.ej. la vista actual del
+        #    lienzo) ─────────────────────────────────────────────────────
+        # Independiente de si la capa tiene o no un filtro (subset string)
+        # propio: esto permite exportar "solo lo que se ve" aunque la capa
+        # en cuestión no tenga configurado ningún filtro por municipio.
+        # setFilterRect() solo descarta entidades que NO tocan la
+        # extensión; una entidad que la toca pero se sale por un lado se
+        # sigue exportando ENTERA. Por eso además se recorta la geometría
+        # de cada entidad a este rectángulo (clip_geom) más abajo.
+        request = QgsFeatureRequest()
+        clip_geom = None
+        if self.extent is not None:
+            ext = self.extent
+            if self.extent_crs is not None and qgis_layer.crs() != self.extent_crs:
+                from qgis.core import QgsCoordinateTransform, QgsProject
+                ext_transform = QgsCoordinateTransform(
+                    self.extent_crs, qgis_layer.crs(), QgsProject.instance())
+                try:
+                    ext = ext_transform.transformBoundingBox(ext)
+                except Exception:
+                    pass
+            request.setFilterRect(ext)
+            from qgis.core import QgsGeometry
+            clip_geom = QgsGeometry.fromRect(ext)
+        features = list(qgis_layer.getFeatures(request))
         total = len(features)
 
-        # Contexto de renderizado necesario para symbolForFeature en QGIS 4
-        ctx = QgsRenderContext()
+        # Contexto de renderizado necesario para symbolForFeature. Se
+        # construye a partir del QgsMapSettings real del lienzo cuando está
+        # disponible: un QgsRenderContext() vacío (sin extensión ni escala)
+        # hace que renderers "Basado en reglas" con filtros de escala o
+        # expresiones puedan no resolver ningún símbolo, y el color cae al
+        # negro por defecto más abajo.
+        if self.map_settings is not None:
+            ctx = QgsRenderContext.fromMapSettings(self.map_settings)
+        else:
+            ctx = QgsRenderContext()
+            try:
+                ctx.setExtent(qgis_layer.extent())
+            except Exception:
+                pass
         if renderer:
             renderer.startRender(ctx, qgis_layer.fields())
 
+        label_settings = _get_label_settings(qgis_layer)
+
         skipped = 0
+        debug_done = False
         for idx, feat in enumerate(features):
             if total > 0:
                 self.progress_cb(int(idx / total * 100), f'Procesando {qgis_layer.name()}…')
 
             try:
                 geom = feat.geometry()
+                if clip_geom is not None and geom is not None and not geom.isEmpty():
+                    try:
+                        geom = geom.intersection(clip_geom)
+                    except Exception:
+                        pass
+                    if geom is None or geom.isEmpty():
+                        continue
 
                 # ── Nombre de la capa DXF ────────────────────────────────
                 if category_field and category_field in [f.name() for f in qgis_layer.fields()]:
@@ -679,13 +967,52 @@ class DXFExporter:
                 # ── Simbología ───────────────────────────────────────────
                 try:
                     symbol = renderer.symbolForFeature(feat, ctx) if renderer else None
-                except Exception:
+                    symbol_error = None
+                except Exception as e:
                     symbol = None
+                    symbol_error = f'{type(e).__name__}: {e}'
+
+                used_rule_fallback = False
+                if symbol is None and renderer is not None:
+                    try:
+                        symbol = _rule_based_symbol_for_feature(renderer, feat, ctx)
+                        used_rule_fallback = symbol is not None
+                    except Exception as e:
+                        if symbol_error is None:
+                            symbol_error = f'(fallback reglas) {type(e).__name__}: {e}'
+
                 props = _symbol_props(symbol)
 
-                if props['color'] is None:
+                fell_back_to_black = props['color'] is None
+                if fell_back_to_black:
                     from qgis.PyQt.QtGui import QColor
                     props['color'] = QColor(0, 0, 0)
+
+                # Diagnóstico (una sola vez por capa QGIS, en la consola de
+                # Python de QGIS): ayuda a identificar exactamente por qué
+                # una capa concreta no está devolviendo color, sin tener
+                # que adivinarlo a ciegas.
+                if not debug_done:
+                    debug_done = True
+                    sl_types = [type(symbol.symbolLayer(i)).__name__
+                                for i in range(symbol.symbolLayerCount())] if symbol else []
+                    print(
+                        f'[CartoDXF debug] capa="{qgis_layer.name()}" '
+                        f'renderer={type(renderer).__name__ if renderer else None} '
+                        f'symbol={type(symbol).__name__ if symbol else None} '
+                        f'symbol_layers={sl_types} '
+                        f'symbol_error={symbol_error} '
+                        f'fallback_reglas={used_rule_fallback} '
+                        f'color={props.get("color").name() if props.get("color") else None} '
+                        f'fill_color={props.get("fill_color").name() if props.get("fill_color") else None} '
+                        f'fallback_negro={fell_back_to_black}'
+                    )
+                    if fell_back_to_black:
+                        self.progress_cb(
+                            int(idx / total * 100) if total else 0,
+                            f'{qgis_layer.name()}: sin color detectado, usando negro '
+                            f'(ver consola de Python para más detalle).'
+                        )
 
                 # Color "principal" de esta feature para la capa DXF y las
                 # etiquetas: el de relleno si existe y se ha pedido unificar
@@ -714,8 +1041,10 @@ class DXFExporter:
                             centroid = geom.centroid().asPoint() if geom else None
                             if centroid:
                                 cp = self._pt(centroid, transform)
+                                rotation = _label_rotation_for_feature(label_settings, feat, ctx, geom)
                                 self._add_text(label_val, cp[0], cp[1],
-                                               label_height, layer_name + '_TEXT', main_color)
+                                               label_height, layer_name + '_TEXT', main_color,
+                                               rotation)
 
             except Exception:
                 # Una feature problemática (geometría inválida, valor de

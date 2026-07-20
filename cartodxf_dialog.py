@@ -293,6 +293,12 @@ _STRINGS = {
         lbl_symbol_size='Tamaño del bloque (unid. del mapa):',
         lbl_text_height='Altura texto (m):',
         chk_reproject='Reproyectar al CRS del proyecto',
+        chk_extent_only='Exportar solo entidades dentro de la vista actual del lienzo',
+        chk_extent_only_tooltip='Activa esto para exportar solo lo que ves en el mapa\n'
+        'ahora mismo (útil si una capa no tiene un filtro propio aplicado\n'
+        'y por eso se exporta entera, p.ej. toda la provincia en vez de\n'
+        'un solo municipio). Se combina con cualquier filtro que ya tenga\n'
+        'la capa: solo se exportan las entidades que cumplen AMBAS cosas.',
         grp_output='Archivo de salida',
         placeholder_output='Selecciona la ruta del archivo DXF…',
         btn_export='▶  Exportar DXF',
@@ -343,6 +349,12 @@ _STRINGS = {
         lbl_symbol_size='Block size (map units):',
         lbl_text_height='Text height (m):',
         chk_reproject='Reproject to the project CRS',
+        chk_extent_only='Export only features within the current canvas view',
+        chk_extent_only_tooltip='Enable this to export only what you currently see on\n'
+        'the map (useful when a layer has no filter of its own applied\n'
+        'and therefore gets exported in full, e.g. the whole province\n'
+        'instead of a single municipality). It combines with any filter\n'
+        'the layer already has: only features matching BOTH are exported.',
         grp_output='Output file',
         placeholder_output='Choose the DXF output path…',
         btn_export='▶  Export DXF',
@@ -383,6 +395,9 @@ class ExportWorker(QThread):
                 output_path=p['output_path'],
                 target_crs=p.get('target_crs'),
                 progress_cb=lambda v, msg: self.progress.emit(v, msg),
+                map_settings=p.get('map_settings'),
+                extent=p.get('extent'),
+                extent_crs=p.get('extent_crs'),
             )
 
             layers = p['layers']
@@ -710,6 +725,11 @@ class CartoDXFDialog(QDialog):
         self.chk_reproject.setChecked(True)
         opts_grid.addWidget(self.chk_reproject, 8, 0, 1, 2)
 
+        self.chk_extent_only = QCheckBox(s['chk_extent_only'])
+        self.chk_extent_only.setChecked(False)
+        self.chk_extent_only.setToolTip(s['chk_extent_only_tooltip'])
+        opts_grid.addWidget(self.chk_extent_only, 9, 0, 1, 2)
+
         main.addWidget(self.grp_opts)
 
         # ── Archivo de salida ─────────────────────────────────────────────
@@ -822,6 +842,8 @@ class CartoDXFDialog(QDialog):
         self.lbl_symbol_size.setText(s['lbl_symbol_size'])
         self.lbl_text_height.setText(s['lbl_text_height'])
         self.chk_reproject.setText(s['chk_reproject'])
+        self.chk_extent_only.setText(s['chk_extent_only'])
+        self.chk_extent_only.setToolTip(s['chk_extent_only_tooltip'])
         self.grp_out.setTitle(s['grp_output'])
         self.edit_output.setPlaceholderText(s['placeholder_output'])
         self.lbl_status.setText(s['status_ready'])
@@ -924,10 +946,25 @@ class CartoDXFDialog(QDialog):
         if self.chk_reproject.isChecked():
             target_crs = QgsProject.instance().crs()
 
+        # Ajustes del lienzo real de QGIS: se usan SIEMPRE para construir un
+        # contexto de render válido (extensión/escala), lo que hace que
+        # renderers "Basado en reglas" con filtros de escala resuelvan bien
+        # el símbolo en vez de caer al negro por defecto.
+        map_settings = self.iface.mapCanvas().mapSettings()
+
+        extent = None
+        extent_crs = None
+        if self.chk_extent_only.isChecked():
+            extent = self.iface.mapCanvas().extent()
+            extent_crs = map_settings.destinationCrs()
+
         params = {
             'output_path': output_path,
             'layers': selected_layers,
             'target_crs': target_crs,
+            'map_settings': map_settings,
+            'extent': extent,
+            'extent_crs': extent_crs,
             'export_labels': self.chk_labels.isChecked(),
             'export_hatch': self.chk_hatch.isChecked(),
             'hatch_pattern': self.combo_hatch_pattern.currentData() or 'SOLID',

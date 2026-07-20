@@ -3,7 +3,7 @@ name=CartoDXF
 qgisMinimumVersion=3.16
 qgisMaximumVersion=4.99
 description=Export QGIS vector layers to a professional DXF, one DXF layer per category, with real colors, line widths and line types. / Exporta capas vectoriales de QGIS a un DXF profesional, una capa DXF por categoría, con colores, grosores y tipos de línea reales.
-version=1.2.1
+version=1.3.0
 author=Kiko Molina
 email=kmlidar@outlook.com
 about=QGIS plugin to export loaded vector layers (points, lines, polygons) to a single
@@ -26,6 +26,11 @@ about=QGIS plugin to export loaded vector layers (points, lines, polygons) to a 
     - Points exported as DXF POINT entities, with an option to also insert a DXF
       block (INSERT) approximating the QGIS marker shape (circle, square, triangle,
       diamond, cross, X, star, pentagon, hexagon...).
+    - Optional export limited to the current canvas view, with geometries clipped
+      to that extent instead of exported whole.
+    - Text labels try to preserve their QGIS orientation (data-defined rotation,
+      or the line's own direction for road-name style labels) instead of always
+      being exported horizontal.
     - Automatic reprojection to the QGIS project CRS.
     - A faulty feature (invalid geometry, unusual category value...) is skipped
       instead of aborting the whole export.
@@ -33,6 +38,35 @@ about=QGIS plugin to export loaded vector layers (points, lines, polygons) to a 
 tracker=https://github.com/kmlidar/CartoDXF/issues
 repository=https://github.com/kmlidar/CartoDXF
 changelog=
+    1.3.0
+    - Fixed: Rule-based renderers (e.g. a building style with scale-dependent
+      "shadow" sub-rules) could resolve to no symbol at all when exporting
+      outside QGIS's normal canvas render pipeline, so the whole DXF layer
+      silently fell back to plain black. Rules are now matched manually,
+      ignoring their scale range (a DXF has no viewing scale), so the
+      correct rule and its real color are used.
+    - Improved: fill-color extraction now also covers advanced fill symbol
+      layer types beyond Simple Fill (gradient, shapeburst, texture/raster,
+      point/line pattern, centroid fill with marker...), instead of leaving
+      the color unresolved and defaulting to black.
+    - Fixed: the render context used to resolve QGIS symbology is now built
+      from the actual current map canvas settings instead of an empty one,
+      so scale- and extent-aware styling resolves correctly.
+    - Added: "Export only features within the current canvas view" option.
+      Previously every export used all features in a layer's data source,
+      so a layer with no filter of its own (subset string) was always
+      exported in full, even if you were just zoomed into part of it
+      (e.g. a whole province instead of a single municipality).
+    - Fixed: with the option above, features that only partly overlapped
+      the exported view used to be exported whole. Geometries are now
+      clipped to that rectangle instead of just included/excluded by a
+      bounding-box test.
+    - Added: exported text labels now try to preserve their QGIS
+      orientation instead of always being horizontal, using the label's
+      own data-defined rotation field/expression when set, or, for labels
+      on line features (e.g. street names), an angle approximated from the
+      line's own direction at the label point.
+
     1.2.1
     - Fixed: Qt6 compatibility issue. Geometry type comparisons used the old
       unscoped enum syntax (e.g. QgsWkbTypes.Point), which is invalid in the
