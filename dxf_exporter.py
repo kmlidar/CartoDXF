@@ -58,8 +58,8 @@ def _ensure_ezdxf():
         _ezdxf = ezdxf
         _TEA = TEA
         return
-    except ImportError:
-        pass
+    except ImportError as e:
+        _log_ignored('_ensure_ezdxf: import inicial de ezdxf (se instalará a continuación)', e)
 
     _install_ezdxf(vendor)
 
@@ -655,11 +655,11 @@ class DXFExporter:
         for lt in ('DASHED', 'DOTTED', 'DASHDOT', 'DIVIDE'):
             try:
                 self.doc.linetypes.add(lt, pattern=[0.5, -0.25])
-            except _ezdxf.DXFTableEntryError:
+            except _ezdxf.DXFTableEntryError as e:
                 # El tipo de línea ya existe en la plantilla base de ezdxf
                 # (algunos vienen predefinidos según la versión); no es un
                 # error real, simplemente no hace falta volver a crearlo.
-                pass
+                _log_ignored(f'DXFExporter.__init__: tipo de línea "{lt}" ya existente', e)
 
     # ── Capa DXF ──────────────────────────────────────────────────────────────
 
@@ -696,10 +696,10 @@ class DXFExporter:
                 try:
                     # color exacto de verdad: propiedad .rgb (gestiona el true_color)
                     lyr.rgb = (qcolor.red(), qcolor.green(), qcolor.blue())
-                except (TypeError, ValueError, AttributeError):
+                except (TypeError, ValueError, AttributeError) as e:
                     # QColor con canales inválidos o no inicializados: nos
                     # quedamos con el color ACI de respaldo ya asignado arriba.
-                    pass
+                    _log_ignored(f'DXFExporter._ensure_layer: color RGB inválido para "{name}"', e)
 
             lyr.dxf.lineweight = lw_dxf
             lyr.linetype = ltype
@@ -882,13 +882,16 @@ class DXFExporter:
     # ── API pública ───────────────────────────────────────────────────────────
 
     def add_layer(self, qgis_layer, category_field=None, label_field=None,
-                  label_height=2.0, export_labels=True, export_hatch=True,
+                  label_height=2.0, label_color=None, export_labels=True, export_hatch=True,
                   export_symbol_block=False, symbol_size=1.0,
                   outline_uses_fill_color=True, hatch_pattern='SOLID', hatch_scale=1.0):
         """
         Procesa una capa QGIS completa.
         category_field: campo cuyo valor se usa como nombre de capa DXF.
                         Si None, se usa el nombre de la capa QGIS.
+        label_color: QColor fijo para el texto de etiqueta de ESTA capa.
+                        Si None (por defecto), se usa el mismo color que la
+                        entidad/símbolo, igual que en versiones anteriores.
         export_symbol_block: además del punto, inserta un bloque DXF con una
                         aproximación del símbolo de QGIS (círculo, cuadrado,
                         triángulo, cruz, X, estrella, pentágono, hexágono...).
@@ -1057,8 +1060,9 @@ class DXFExporter:
                             if centroid:
                                 cp = self._pt(centroid, transform)
                                 rotation = _label_rotation_for_feature(label_settings, feat, ctx, geom)
+                                text_color = label_color if label_color is not None else main_color
                                 self._add_text(label_val, cp[0], cp[1],
-                                               label_height, layer_name + '_TEXT', main_color,
+                                               label_height, layer_name + '_TEXT', text_color,
                                                rotation)
 
             except Exception:

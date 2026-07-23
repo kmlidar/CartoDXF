@@ -5,14 +5,14 @@ cartodxf_dialog.py  —  Diálogo principal del plugin CartoDXF
 import traceback
 
 from qgis.PyQt.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QPushButton, QFileDialog, QListWidget,
-    QListWidgetItem, QGroupBox, QComboBox, QCheckBox,
+    QVBoxLayout, QHBoxLayout, QGridLayout,
+    QLabel, QPushButton, QFileDialog,
+    QGroupBox, QComboBox, QCheckBox,
     QDoubleSpinBox, QProgressBar, QMessageBox, QLineEdit,
-    QAbstractItemView, QWidget, QLayout,
+    QWidget, QScrollArea, QFrame, QColorDialog, QDockWidget,
 )
 from qgis.PyQt.QtCore import Qt, QThread, pyqtSignal, QUrl, QSettings
-from qgis.PyQt.QtGui import QDesktopServices
+from qgis.PyQt.QtGui import QDesktopServices, QGuiApplication
 
 from qgis.core import QgsProject, QgsMapLayerType
 
@@ -49,7 +49,7 @@ QWidget {{
     color: {fg};
     font-size: 9pt;
 }}
-QDialog {{ background: {bg}; }}
+QDockWidget {{ background: {bg}; }}
 QGroupBox {{
     font-weight: bold;
     border: 1px solid {border};
@@ -238,13 +238,28 @@ QLabel#lbl_header {{
     background: {header_bg};
     padding: 4px;
 }}
-QListWidget {{
+QScrollArea {{
+    background: transparent;
+    border: none;
+}}
+QScrollArea > QWidget > QWidget {{
+    background: transparent;
+}}
+#layers_table_widget {{
     background: {panel};
     border: 1px solid {border};
     border-radius: 3px;
 }}
-QListWidget::item {{
-    border-bottom: 1px solid {border};
+QPushButton#btn_color_swatch {{
+    border: 1px solid {border};
+    border-radius: 3px;
+    padding: 0px;
+}}
+QPushButton#btn_color_reset {{
+    border: 1px solid {border};
+    border-radius: 3px;
+    padding: 0px;
+    font-weight: bold;
 }}
 """
 
@@ -268,9 +283,22 @@ _STRINGS = {
         grp_layers='Capas a exportar',
         btn_all='Seleccionar todas',
         btn_none='Deseleccionar todas',
-        col_header='  ☑  Capa                                    Capa DXF                       Texto/etiqueta',
-        col_dxf='Capa DXF:',
-        col_label='Texto/etiqueta:',
+        col_name='Capa',
+        col_dxf='Capa DXF',
+        col_label='Texto/etiqueta',
+        col_text_size='Tamaño texto',
+        col_text_color='Color texto',
+        text_size_auto='Auto',
+        text_size_tooltip='Altura del texto exportado para ESTA capa, en las\n'
+        'unidades del mapa (p.ej. metros). "Auto" usa la altura general\n'
+        'indicada en Opciones → Altura texto, para no tener que repetirla\n'
+        'capa por capa.',
+        text_color_pick_tooltip='Elegir un color de texto fijo para ESTA capa\n'
+        '(en vez del color de la propia entidad/símbolo, que es lo que\n'
+        'se usa por defecto).',
+        text_color_reset_tooltip='Quitar el color personalizado y volver a usar\n'
+        'el color de la entidad/símbolo (por defecto).',
+        text_color_dialog_title='Elige el color del texto',
         combo_layer_name='(nombre de capa)',
         combo_no_label='(sin etiqueta)',
         chk_include_tooltip='Incluir o excluir esta capa de la exportación.',
@@ -324,9 +352,21 @@ _STRINGS = {
         grp_layers='Layers to export',
         btn_all='Select all',
         btn_none='Deselect all',
-        col_header='  ☑  Layer                                    DXF layer                       Text/label',
-        col_dxf='DXF layer:',
-        col_label='Text/label:',
+        col_name='Layer',
+        col_dxf='DXF layer',
+        col_label='Text/label',
+        col_text_size='Text size',
+        col_text_color='Text color',
+        text_size_auto='Auto',
+        text_size_tooltip='Text height exported for THIS layer, in map units\n'
+        '(e.g. meters). "Auto" uses the general height set in\n'
+        'Options → Text height, so you don\'t have to repeat it for\n'
+        'every layer.',
+        text_color_pick_tooltip='Pick a fixed text color for THIS layer\n'
+        '(instead of the feature/symbol color, which is used by default).',
+        text_color_reset_tooltip='Remove the custom color and go back to using\n'
+        'the feature/symbol color (default).',
+        text_color_dialog_title='Choose the text color',
         combo_layer_name='(layer name)',
         combo_no_label='(no label)',
         chk_include_tooltip='Include or exclude this layer from the export.',
@@ -410,7 +450,8 @@ class ExportWorker(QThread):
                     qgis_layer=item['layer'],
                     category_field=item.get('category_field'),
                     label_field=item.get('label_field'),
-                    label_height=p.get('label_height', 2.0),
+                    label_height=item.get('label_height') or p.get('label_height', 2.0),
+                    label_color=item.get('label_color'),
                     export_labels=p.get('export_labels', True),
                     export_hatch=p.get('export_hatch', True),
                     export_symbol_block=p.get('export_symbol_block', False),
@@ -429,42 +470,48 @@ class ExportWorker(QThread):
             self.error.emit(f"{type(e).__name__}: {e}\n\n{traceback.format_exc()}")
 
 
-class LayerConfigWidget(QWidget):
-    """Widget de configuración por capa."""
+class LayerConfigWidget:
+    """Fila de configuración de una capa.
 
-    def __init__(self, layer, strings, parent=None):
-        super().__init__(parent)
+    A diferencia de antes, esto YA NO es un QWidget contenedor con su
+    propio QHBoxLayout: sus controles se insertan directamente como
+    celdas del QGridLayout COMPARTIDO por toda la tabla de capas (ver
+    CartoDXFDialog._build_ui). Al vivir todos en el mismo grid, Qt alinea
+    automáticamente el ancho de cada columna ("Capa DXF", "Texto/etiqueta",
+    "Tamaño texto", "Color texto") según el control más ancho de esa
+    columna en CUALQUIER fila — así todas las capas quedan alineadas en
+    columnas reales sin importar cuánto varíe la longitud del nombre de
+    cada capa de QGIS (antes cada fila era un layout independiente, así
+    que el resto de columnas se desplazaban según esa longitud).
+    """
+
+    def __init__(self, layer, strings, grid, row):
         self.layer = layer
         self._strings = strings
-        self._build_ui()
+        self._full_name = layer.name()
+        self._custom_color = None  # QColor o None → usa el color de la entidad
+        self._build_ui(grid, row)
         self.chk_include.toggled.connect(self._on_toggle_include)
         self._on_toggle_include(self.chk_include.isChecked())
 
-    def _build_ui(self):
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(4, 2, 4, 2)
-        layout.setSpacing(8)
+    def _build_ui(self, grid, row):
+        s = self._strings
 
         # Checkbox individual: decide si esta capa se exporta o no.
-        # (Va DENTRO del widget de la fila -a diferencia del checkbox nativo
-        # de QListWidgetItem- porque este widget cubre toda la fila y, si no,
-        # el clic nunca llegaría al indicador nativo: por eso antes solo
-        # funcionaban "Seleccionar todas"/"Deseleccionar todas".)
         self.chk_include = QCheckBox()
         self.chk_include.setChecked(True)
-        self.chk_include.setToolTip(self._strings['chk_include_tooltip'])
-        layout.addWidget(self.chk_include)
+        self.chk_include.setToolTip(s['chk_include_tooltip'])
+        grid.addWidget(self.chk_include, row, 0)
 
-        # Nombre de la capa
-        self.lbl_name = QLabel(self.layer.name())
-        self.lbl_name.setMinimumWidth(90)
-        self.lbl_name.setMaximumWidth(180)
-        self.lbl_name.setToolTip(self.layer.source())
-        layout.addWidget(self.lbl_name)
+        # Nombre de la capa (con elipsis si es muy largo; el nombre
+        # completo siempre queda disponible en el tooltip, junto con el
+        # origen de la capa).
+        self.lbl_name = QLabel()
+        self.lbl_name.setToolTip(f'{self._full_name}\n{self.layer.source()}')
+        grid.addWidget(self.lbl_name, row, 1)
+        self._update_name_label()
 
         # Campo de categoría → define el NOMBRE DE LA CAPA DXF resultante.
-        self.lbl_cat = QLabel(self._strings['col_dxf'])
-        layout.addWidget(self.lbl_cat)
         self.combo_cat = QComboBox()
         self.combo_cat.setMinimumWidth(120)
         self.combo_cat.setToolTip(
@@ -473,7 +520,7 @@ class LayerConfigWidget(QWidget):
             'Si eliges un campo, cada valor distinto de ese campo genera\n'
             'su propia capa DXF (p.ej. una capa por cada tipo de vía).'
         )
-        self.combo_cat.addItem(self._strings['combo_layer_name'], None)
+        self.combo_cat.addItem(s['combo_layer_name'], None)
         for field in self.layer.fields():
             self.combo_cat.addItem(field.name(), field.name())
         # Autodetectar campo "layer" o "LAYER"
@@ -481,11 +528,9 @@ class LayerConfigWidget(QWidget):
             if self.combo_cat.itemText(i).lower() == 'layer':
                 self.combo_cat.setCurrentIndex(i)
                 break
-        layout.addWidget(self.combo_cat)
+        grid.addWidget(self.combo_cat, row, 2)
 
         # Campo de etiqueta → texto DXF que se escribe junto a cada entidad.
-        self.lbl_lbl = QLabel(self._strings['col_label'])
-        layout.addWidget(self.lbl_lbl)
         self.combo_lbl = QComboBox()
         self.combo_lbl.setMinimumWidth(120)
         self.combo_lbl.setToolTip(
@@ -495,7 +540,7 @@ class LayerConfigWidget(QWidget):
             'distintos, o dejar esta opción en "(sin etiqueta)" si solo\n'
             'quieres organizar capas sin escribir ningún rótulo.'
         )
-        self.combo_lbl.addItem(self._strings['combo_no_label'], None)
+        self.combo_lbl.addItem(s['combo_no_label'], None)
         for field in self.layer.fields():
             self.combo_lbl.addItem(field.name(), field.name())
         # Autodetectar campo de etiqueta activo en QGIS
@@ -505,14 +550,95 @@ class LayerConfigWidget(QWidget):
                 if self.combo_lbl.itemText(i) == lbl_field:
                     self.combo_lbl.setCurrentIndex(i)
                     break
-        layout.addWidget(self.combo_lbl)
-        layout.addStretch()
+        grid.addWidget(self.combo_lbl, row, 3)
+
+        # Tamaño de texto por capa: 0 (valor especial) = "Auto", es decir,
+        # usar la altura general de Opciones sin tener que repetirla en
+        # cada fila.
+        self.spin_text_size = QDoubleSpinBox()
+        self.spin_text_size.setRange(0.0, 1000.0)
+        self.spin_text_size.setDecimals(2)
+        self.spin_text_size.setSingleStep(0.5)
+        self.spin_text_size.setSpecialValueText(s['text_size_auto'])
+        self.spin_text_size.setValue(0.0)
+        self.spin_text_size.setMinimumWidth(70)
+        self.spin_text_size.setToolTip(s['text_size_tooltip'])
+        grid.addWidget(self.spin_text_size, row, 4)
+
+        # Color de texto por capa: un botón-muestra (elige color) más un
+        # botón de reinicio, agrupados en un único widget contenedor para
+        # que sigan contando como UNA sola celda del grid.
+        self.color_box = QWidget()
+        color_layout = QHBoxLayout(self.color_box)
+        color_layout.setContentsMargins(0, 0, 0, 0)
+        color_layout.setSpacing(2)
+        self.btn_color = QPushButton()
+        self.btn_color.setObjectName('btn_color_swatch')
+        self.btn_color.setFixedSize(28, 22)
+        self.btn_color.setToolTip(s['text_color_pick_tooltip'])
+        self.btn_color.clicked.connect(self._pick_color)
+        self.btn_color_reset = QPushButton('↺')
+        self.btn_color_reset.setObjectName('btn_color_reset')
+        self.btn_color_reset.setFixedSize(22, 22)
+        self.btn_color_reset.setToolTip(s['text_color_reset_tooltip'])
+        self.btn_color_reset.clicked.connect(self._reset_color)
+        color_layout.addWidget(self.btn_color)
+        color_layout.addWidget(self.btn_color_reset)
+        grid.addWidget(self.color_box, row, 5)
+        self._update_color_button()
+
+    def _update_name_label(self):
+        fm = self.lbl_name.fontMetrics()
+        elided = fm.elidedText(self._full_name, Qt.TextElideMode.ElideRight, 170)
+        self.lbl_name.setText(elided)
+
+    def _pick_color(self):
+        initial = self._custom_color if self._custom_color is not None else self.lbl_name.palette().windowText().color()
+        color = QColorDialog.getColor(initial, None, self._strings.get('text_color_dialog_title', 'Color'))
+        if color.isValid():
+            self._custom_color = color
+            self._update_color_button()
+
+    def _reset_color(self):
+        self._custom_color = None
+        self._update_color_button()
+
+    def _update_color_button(self):
+        if self._custom_color is not None:
+            self.btn_color.setStyleSheet(
+                f'background-color: {self._custom_color.name()};'
+            )
+        else:
+            self.btn_color.setStyleSheet('')
+        self.btn_color_reset.setEnabled(
+            self.chk_include.isChecked() and self._custom_color is not None
+        )
+
+    def remove_from_grid(self):
+        """Quita y destruye todos los controles de esta fila del grid
+        compartido (usado al recargar la lista de capas)."""
+        for widget in (self.chk_include, self.lbl_name, self.combo_cat,
+                       self.combo_lbl, self.spin_text_size, self.color_box):
+            widget.setParent(None)
+            widget.deleteLater()
 
     def category_field(self):
         return self.combo_cat.currentData()
 
     def label_field(self):
         return self.combo_lbl.currentData()
+
+    def label_height_override(self):
+        """Altura de texto específica de esta capa, o None si está en
+        "Auto" (usar la altura general de Opciones)."""
+        value = self.spin_text_size.value()
+        return value if value > 0 else None
+
+    def label_color_override(self):
+        """QColor específico para el texto de esta capa, o None si debe
+        usarse el color de la propia entidad/símbolo (comportamiento por
+        defecto, igual que en versiones anteriores)."""
+        return self._custom_color
 
     def is_included(self):
         return self.chk_include.isChecked()
@@ -521,24 +647,38 @@ class LayerConfigWidget(QWidget):
         self.chk_include.setChecked(checked)
 
     def _on_toggle_include(self, checked):
-        # Si la capa está desmarcada, se deshabilitan sus combos para dejar
-        # visualmente claro que no participarán en la exportación.
+        # Si la capa está desmarcada, se deshabilitan sus controles para
+        # dejar visualmente claro que no participarán en la exportación.
         self.lbl_name.setEnabled(checked)
-        self.lbl_cat.setEnabled(checked)
         self.combo_cat.setEnabled(checked)
-        self.lbl_lbl.setEnabled(checked)
         self.combo_lbl.setEnabled(checked)
+        self.spin_text_size.setEnabled(checked)
+        self.btn_color.setEnabled(checked)
+        self.btn_color_reset.setEnabled(checked and self._custom_color is not None)
 
     def retranslate(self, strings):
         self._strings = strings
         self.chk_include.setToolTip(strings['chk_include_tooltip'])
-        self.lbl_cat.setText(strings['col_dxf'])
-        self.lbl_lbl.setText(strings['col_label'])
         self.combo_cat.setItemText(0, strings['combo_layer_name'])
         self.combo_lbl.setItemText(0, strings['combo_no_label'])
+        self.spin_text_size.setSpecialValueText(strings['text_size_auto'])
+        self.spin_text_size.setToolTip(strings['text_size_tooltip'])
+        self.btn_color.setToolTip(strings['text_color_pick_tooltip'])
+        self.btn_color_reset.setToolTip(strings['text_color_reset_tooltip'])
 
 
-class CartoDXFDialog(QDialog):
+class CartoDXFDialog(QDockWidget):
+    """Panel principal de CartoDXF.
+
+    Antes era un QDialog modal (dlg.exec()): mientras estaba abierto,
+    bloqueaba el resto de QGIS por completo (no se podía tocar el lienzo
+    ni ninguna otra ventana hasta cerrarlo). Ahora es un QDockWidget, como
+    los paneles nativos de QGIS ("Capas", "Navegador"...): se puede dejar
+    abierto flotando sobre QGIS SIN bloquear nada, y también anclar a
+    cualquier lateral de la ventana principal arrastrándolo por su barra
+    de título, exactamente igual que esos paneles nativos.
+    """
+
     def __init__(self, iface, parent=None):
         super().__init__(parent or iface.mainWindow())
         self.iface = iface
@@ -564,23 +704,57 @@ class CartoDXFDialog(QDialog):
         self.strings = _STRINGS[self._lang]
 
         self.setWindowTitle('CartoDXF')
+        self.setObjectName('CartoDXFDockWidget')  # para que QGIS recuerde su posición/estado
+        # Se permite anclar en cualquier lateral; el usuario decide si lo
+        # deja flotando (por defecto) o lo engancha a un lado arrastrándolo.
+        self.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
+        self.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetClosable
+            | QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        )
+
         self._build_ui()
         self._load_layers()
 
-        # El tamaño mínimo se calcula a partir de lo que el propio contenido
-        # necesita (en vez de un valor fijo tipo 780x600, que se quedaba
-        # corto en altura cada vez que se añadían opciones nuevas y permitía
-        # encoger la ventana hasta que los textos y controles se solapaban).
-        # Con SetMinimumSize, Qt mantiene el mínimo de la ventana sincronizado
-        # con el mínimo real del layout tanto en ancho como en alto, así que
-        # ya no hace falta recalcularlo a mano si se agregan más opciones.
-        self.layout().setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
-        self.resize(820, 760)
+        # Mantiene la tabla de capas sincronizada mientras el panel
+        # permanece abierto (ya no es una ventana modal de usar-y-cerrar,
+        # sino un panel que puede quedarse abierto todo el rato): si se
+        # cargan capas nuevas se añaden solas; si se elimina alguna que ya
+        # estaba en la tabla, se reconstruye para no dejar huecos.
+        project = QgsProject.instance()
+        project.layersAdded.connect(self._sync_layers)
+        project.layersRemoved.connect(self._sync_layers)
+        project.cleared.connect(self._sync_layers)
+
+        # Antes se usaba SetMinimumSize para que la ventana nunca pudiera
+        # encogerse por debajo de lo que su contenido necesitaba — pero eso
+        # es precisamente lo que hacía que la ventana tuviera que ser MÁS
+        # ALTA que la pantalla en portátiles pequeños, dejando el botón
+        # "Ejecutar" inalcanzable sin usar el tabulador. Ahora que las capas
+        # y las opciones están dentro de un QScrollArea (ver _build_ui), el
+        # contenido puede desplazarse en vez de forzar el tamaño de la
+        # ventana, así que basta con un mínimo modesto y fijo.
+        self.setMinimumSize(560, 420)
+
+        # Tamaño inicial: 820x760 si la pantalla lo permite, pero sin
+        # superar nunca el espacio disponible (con un margen para la barra
+        # de tareas/título), para que la ventana quepa entera —incluido el
+        # botón "Ejecutar"— también en portátiles con pantallas pequeñas.
+        screen = QGuiApplication.screenAt(self.pos()) or QGuiApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen else None
+        width = min(820, avail.width() - 60) if avail else 820
+        height = min(760, avail.height() - 80) if avail else 760
+        self.resize(max(width, 560), max(height, 420))
 
     # ── UI ────────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        main = QVBoxLayout(self)
+        # Un QDockWidget no admite un layout propio directamente (como sí
+        # hacía QDialog): necesita un widget de contenido interno, que se
+        # asigna al final con setWidget().
+        content = QWidget()
+        main = QVBoxLayout(content)
         main.setSpacing(8)
         main.setContentsMargins(12, 12, 12, 12)
 
@@ -625,18 +799,34 @@ class CartoDXFDialog(QDialog):
         sel_row.addStretch()
         grp_layout.addLayout(sel_row)
 
-        # Cabecera
-        self.lbl_col_header = QLabel(s['col_header'])
-        self.lbl_col_header.setObjectName('lbl_header')
-        grp_layout.addWidget(self.lbl_col_header)
+        # Tabla de capas: un único QGridLayout compartido por la cabecera y
+        # TODAS las filas de capas. Al vivir en el mismo grid, Qt calcula el
+        # ancho de cada columna (Capa, Capa DXF, Texto/etiqueta, Tamaño
+        # texto, Color texto) a partir del control más ancho de ESA columna
+        # en cualquier fila, así que las columnas quedan alineadas de
+        # verdad entre capas, sin importar cuánto varíe la longitud de cada
+        # nombre de capa (antes cada fila era un layout independiente y el
+        # resto de columnas se desplazaban según esa longitud).
+        self.layers_grid = QGridLayout()
+        self.layers_grid.setHorizontalSpacing(10)
+        self.layers_grid.setVerticalSpacing(3)
+        self.layers_grid.setColumnStretch(1, 1)
 
-        # Lista de capas
-        self.list_layers = QListWidget()
-        self.list_layers.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        self.list_layers.setMinimumHeight(220)
-        grp_layout.addWidget(self.list_layers)
+        self._layers_header_labels = []
+        header_texts = [
+            '', s['col_name'], s['col_dxf'], s['col_label'],
+            s['col_text_size'], s['col_text_color'],
+        ]
+        for col, text in enumerate(header_texts):
+            lbl = QLabel(text)
+            lbl.setObjectName('lbl_header')
+            self.layers_grid.addWidget(lbl, 0, col)
+            self._layers_header_labels.append(lbl)
 
-        main.addWidget(self.grp_layers)
+        layers_table_widget = QWidget()
+        layers_table_widget.setObjectName('layers_table_widget')
+        layers_table_widget.setLayout(self.layers_grid)
+        grp_layout.addWidget(layers_table_widget)
 
         # ── Opciones generales ────────────────────────────────────────────
         self.grp_opts = QGroupBox(s['grp_opts'])
@@ -730,7 +920,31 @@ class CartoDXFDialog(QDialog):
         self.chk_extent_only.setToolTip(s['chk_extent_only_tooltip'])
         opts_grid.addWidget(self.chk_extent_only, 9, 0, 1, 2)
 
-        main.addWidget(self.grp_opts)
+        # ── Área con scroll para capas + opciones ──────────────────────────
+        # Antes "grp_layers" y "grp_opts" se añadían directamente al layout
+        # principal, así que la ventana entera tenía que crecer lo bastante
+        # para mostrar TODO su contenido a la vez (favorecido además por
+        # SetMinimumSize más abajo). En portátiles con pantalla pequeña eso
+        # dejaba el botón "Ejecutar" fuera de la pantalla, alcanzable solo
+        # con el tabulador. Ahora ambos grupos viven dentro de un único
+        # QScrollArea con scroll propio; el archivo de salida, la barra de
+        # progreso y los botones quedan FUERA de él, así que "Ejecutar"
+        # siempre es visible sin necesidad de agrandar la ventana ni de
+        # desplazarse hasta el final.
+        scroll_content = QWidget()
+        scroll_layout = QVBoxLayout(scroll_content)
+        scroll_layout.setContentsMargins(0, 0, 0, 0)
+        scroll_layout.setSpacing(8)
+        scroll_layout.addWidget(self.grp_layers)
+        scroll_layout.addWidget(self.grp_opts)
+        scroll_layout.addStretch()
+
+        self.main_scroll = QScrollArea()
+        self.main_scroll.setWidgetResizable(True)
+        self.main_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.main_scroll.setWidget(scroll_content)
+        self.main_scroll.setMinimumHeight(200)
+        main.addWidget(self.main_scroll, 1)
 
         # ── Archivo de salida ─────────────────────────────────────────────
         self.grp_out = QGroupBox(s['grp_output'])
@@ -771,13 +985,15 @@ class CartoDXFDialog(QDialog):
 
         self.btn_close = QPushButton(s['btn_close'])
         self.btn_close.setObjectName('btn_close')
-        self.btn_close.clicked.connect(self.close)
+        self.btn_close.clicked.connect(self.close)  # QDockWidget.close() lo oculta, no lo destruye
         btn_row.addWidget(self.btn_close)
 
         main.addLayout(btn_row)
 
         self._update_theme_button()
         self._update_lang_button()
+
+        self.setWidget(content)
 
     # ── Tema ──────────────────────────────────────────────────────────────────
 
@@ -822,7 +1038,12 @@ class CartoDXFDialog(QDialog):
         self.grp_layers.setTitle(s['grp_layers'])
         self.btn_all.setText(s['btn_all'])
         self.btn_none.setText(s['btn_none'])
-        self.lbl_col_header.setText(s['col_header'])
+        header_texts = [
+            '', s['col_name'], s['col_dxf'], s['col_label'],
+            s['col_text_size'], s['col_text_color'],
+        ]
+        for lbl, text in zip(self._layers_header_labels, header_texts):
+            lbl.setText(text)
         self.grp_opts.setTitle(s['grp_opts'])
         self.chk_labels.setText(s['chk_labels'])
         self.chk_hatch.setText(s['chk_hatch'])
@@ -859,26 +1080,53 @@ class CartoDXFDialog(QDialog):
     # ── Carga de capas ────────────────────────────────────────────────────────
 
     def _load_layers(self):
-        self.list_layers.clear()
+        # Quita las filas anteriores del grid compartido (todo excepto la
+        # cabecera, que ocupa la fila 0) antes de reconstruirlas.
+        for widget in self.layer_widgets.values():
+            widget.remove_from_grid()
         self.layer_widgets.clear()
 
         layers = QgsProject.instance().mapLayers().values()
         vector_layers = [lyr for lyr in layers if lyr.type() == QgsMapLayerType.VectorLayer]
 
-        for layer in vector_layers:
-            item = QListWidgetItem()
-            # Este item ya NO usa su propio checkbox nativo: el checkbox real
-            # vive dentro de LayerConfigWidget (ver más abajo), porque el
-            # widget de la fila cubre todo el ancho y bloquearía los clics
-            # sobre el indicador nativo del QListWidgetItem.
-            item.setData(Qt.ItemDataRole.UserRole, layer.id())
-
-            widget = LayerConfigWidget(layer, self.strings)
+        for row, layer in enumerate(vector_layers, start=1):
+            widget = LayerConfigWidget(layer, self.strings, self.layers_grid, row)
             self.layer_widgets[layer.id()] = widget
 
-            item.setSizeHint(widget.sizeHint())
-            self.list_layers.addItem(item)
-            self.list_layers.setItemWidget(item, widget)
+    def _sync_layers(self, *_args):
+        """Mantiene la tabla de capas al día mientras el panel permanece
+        abierto (a diferencia de la ventana modal de antes, este panel
+        puede quedarse abierto todo el rato, así que el proyecto puede
+        cambiar mientras tanto).
+
+        Se conecta a layersAdded/layersRemoved/cleared de QgsProject.
+        Si solo se han AÑADIDO capas nuevas, se agregan sus filas al final
+        sin tocar las demás, conservando la configuración que ya tuviera
+        el usuario en el resto (capa DXF, etiqueta, tamaño/color de
+        texto...). Si alguna capa que ya estaba en la tabla ha
+        desaparecido del proyecto, se reconstruye la tabla entera: es más
+        sencillo y seguro que intentar "tapar" el hueco que deja esa fila
+        concreta en el grid.
+        """
+        layers = QgsProject.instance().mapLayers().values()
+        vector_layers = {lyr.id(): lyr for lyr in layers if lyr.type() == QgsMapLayerType.VectorLayer}
+
+        current_ids = set(self.layer_widgets.keys())
+        new_ids = set(vector_layers.keys())
+
+        if current_ids - new_ids:
+            self._load_layers()
+            return
+
+        added_ids = new_ids - current_ids
+        if not added_ids:
+            return
+
+        next_row = self.layers_grid.rowCount()
+        for layer_id in added_ids:
+            widget = LayerConfigWidget(vector_layers[layer_id], self.strings, self.layers_grid, next_row)
+            self.layer_widgets[layer_id] = widget
+            next_row += 1
 
     # ── Selección de capas ────────────────────────────────────────────────────
 
@@ -935,6 +1183,11 @@ class CartoDXFDialog(QDialog):
                         'layer': layer,
                         'category_field': widget.category_field(),
                         'label_field': widget.label_field(),
+                        # None en cualquiera de estas dos = usar el valor
+                        # general (altura de Opciones / color de la propia
+                        # entidad), igual que en versiones anteriores.
+                        'label_height': widget.label_height_override(),
+                        'label_color': widget.label_color_override(),
                     })
 
         if not selected_layers:

@@ -3,7 +3,7 @@ name=CartoDXF
 qgisMinimumVersion=3.16
 qgisMaximumVersion=4.99
 description=Export QGIS vector layers to a professional DXF, one DXF layer per category, with real colors, line widths and line types. / Exporta capas vectoriales de QGIS a un DXF profesional, una capa DXF por categoría, con colores, grosores y tipos de línea reales.
-version=1.3.0
+version=1.4.0
 author=Kiko Molina
 email=kmlidar@outlook.com
 about=QGIS plugin to export loaded vector layers (points, lines, polygons) to a single
@@ -38,6 +38,34 @@ about=QGIS plugin to export loaded vector layers (points, lines, polygons) to a 
 tracker=https://github.com/kmlidar/CartoDXF/issues
 repository=https://github.com/kmlidar/CartoDXF
 changelog=
+    1.4.0
+    - Changed: the CartoDXF panel is no longer a modal window that blocked
+      the rest of QGIS (map canvas, other panels...) until closed. It is
+      now a dockable panel, like QGIS's own "Layers" or "Browser" panels:
+      it can stay open while you keep working on the map, and it can be
+      docked to any side of the QGIS window by dragging its title bar, or
+      left floating (the default, matching the previous look).
+    - The layer table now stays in sync while the panel remains open: new
+      layers added to the project appear automatically, and removing a
+      layer that was already listed refreshes the table, without losing
+      the per-layer settings (DXF field, label field, text size/color)
+      already configured for the other layers.
+
+    1.3.1
+    - Fixed: the layer list showed each row as an independent widget, so
+      the "DXF layer" and "Text/label" columns drifted out of alignment
+      depending on how long each layer's name was. All rows now share a
+      single table (grid) layout, so every column lines up regardless of
+      layer name length.
+    - Added: per-layer text size and text color for exported labels, with
+      an "Auto" default (uses the general text height / the feature's own
+      color, as before) that can be overridden individually per layer.
+    - Fixed: on small screens/laptops, the dialog window could end up
+      taller than the screen, pushing the "Export" button out of view and
+      only reachable with the Tab key. The layers and options sections are
+      now scrollable on their own, while the output path, progress bar and
+      buttons stay pinned and always visible.
+
     1.3.0
     - Fixed: Rule-based renderers (e.g. a building style with scale-dependent
       "shadow" sub-rules) could resolve to no symbol at all when exporting
